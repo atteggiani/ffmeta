@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ffmeta"
+dynamic = ["version"]
+description = "Embed, read, edit, remove and verify free-text metadata in UM fieldsfiles and ancillary files"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+authors = [{ name = "ACCESS-NRI" }]
+keywords = ["unified model", "fieldsfile", "ancillary", "metadata", "mule", "iris"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Atmospheric Science",
+  "Typing :: Typed",
+]
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+iris = ["scitools-iris"]
+test = ["pytest"]
+dev = ["pytest", "ruff", "mypy"]
+
+[project.scripts]
+ffmeta = "ffmeta.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/ACCESS-NRI/ffmeta"
+
+[tool.setuptools.dynamic]
+version = { attr = "ffmeta._version.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ffmeta = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+ignore_missing_imports = true
