@@ -25,23 +25,22 @@ EXIT_OK, EXIT_NOT_FOUND, EXIT_ERROR = 0, 1, 2
 
 _EXAMPLES = """\
 examples:
-  ffmeta add run.ff --set experiment=abc123 --set source.doi=10.1234/xyz
-  ffmeta add run.ff --json '{"project": "ACCESS", "contact": "me@example.org"}'
-  ffmeta add run.ff --json-file meta.json --reserve 4096 -o run_with_meta.ff
-  ffmeta read run.ff
-  ffmeta read run.ff --key source.doi --raw
-  ffmeta edit run.ff --set version=2 --unset contact
-  ffmeta edit run.ff                       # open the metadata in $VISUAL / $EDITOR
-  ffmeta remove run.ff
-  ffmeta verify run.ff -O run_original.ff --mule --iris
+  ffmeta add um_file.ff --set experiment=abc123 --set source.doi=10.1234/xyz
+  ffmeta add um_file.ff --json '{"project": "ACCESS", "contact": "me@example.org"}'
+  ffmeta add um_file.ff --json-file metadata.json -o run_with_meta.ff
+  ffmeta read um_file.ff
+  ffmeta read um_file.ff --key source.doi --raw
+  ffmeta edit um_file.ff --set version=2 --unset contact
+  ffmeta edit um_file.ff                       # open the metadata in $VISUAL / $EDITOR
+  ffmeta remove um_file.ff
+  ffmeta verify um_file.ff -O run_original.ff --mule --iris
 """
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ffmeta",
-        description="Embed, read, edit, remove and verify metadata in UM fieldsfiles and "
-        "ancillary files.",
+        description="Add, read, edit, remove and verify metadata in UM files.",
         epilog=_EXAMPLES,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -73,13 +72,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_add.add_argument("file", metavar="FILE")
     meta_inputs(p_add, "")
     p_add.add_argument(
-        "--reserve",
-        type=int,
-        default=0,
-        metavar="BYTES",
-        help="extra zero bytes kept in the block so later edits can grow in place",
-    )
-    p_add.add_argument(
         "--no-hash", action="store_true", help="do not store the SHA-256 of the original file"
     )
     p_add.add_argument(
@@ -101,8 +93,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_read = sub.add_parser("read", help="print the metadata")
     p_read.add_argument("file", metavar="FILE")
     p_read.add_argument("--key", metavar="DOTTED.KEY", help="print only this key")
-    p_read.add_argument("--raw", action="store_true", help="print strings without JSON quoting")
-    p_read.add_argument("--compact", action="store_true", help="single-line JSON")
+    p_read.add_argument("--raw", "-r", action="store_true", help="print strings without JSON quoting")
+    p_read.add_argument("--compact", "-c", action="store_true", help="single-line JSON")
     p_read.add_argument("--envelope", action="store_true", help="print the whole envelope")
     p_read.set_defaults(func=cmd_read)
 
@@ -135,7 +127,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_edit.set_defaults(func=cmd_edit)
 
-    p_rm = sub.add_parser("remove", help="remove the metadata and restore the header")
+    p_rm = sub.add_parser("remove", help="remove the metadata from the file")
     p_rm.add_argument("file", metavar="FILE")
     p_rm.add_argument("-o", "--output", metavar="OUT", help="write to OUT and leave FILE untouched")
     p_rm.add_argument(
@@ -211,7 +203,6 @@ def cmd_add(args: argparse.Namespace) -> int:
         raise ValueError("no metadata given: use --json, --json-file or --set")
     kwargs = dict(
         with_hash=not args.no_hash,
-        reserve=args.reserve,
         align_sector=args.align_sector,
         force=args.force,
     )

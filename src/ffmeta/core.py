@@ -1,12 +1,9 @@
 """Add, read, edit and remove ffmeta metadata in UM files.
 
-Layout strategies
------------------
-New blocks use :class:`TrailingLayout`: they are appended after the last byte
-of the file, and the two pointer words for ``temp_historyfile`` are updated.
-
-Reading, editing and removing work purely by pointer, so they do not depend on
-where the block currently is (e.g. after Mule has rewritten the file).
+The metadata block is always appended after the last byte of the file and the
+two pointer words for ``temp_historyfile`` are updated. Reading works purely by
+pointer; editing and removing require the block to still be the last thing in
+the file (it may not be after another tool, e.g. Mule, has rewritten the file).
 """
 
 from __future__ import annotations
@@ -57,7 +54,6 @@ __all__ = [
     "plan_edit",
     "plan_remove",
     "Plan",
-    "TrailingLayout",
 ]
 
 _READ_LIMIT = 1 << 26  # refuse to read blocks larger than 64 MiB in one go
@@ -252,34 +248,12 @@ def _section_pointer_words(section: str) -> tuple[int, int]:
     return comp.start_word, comp.length_word
 
 
-# --- layout strategies ------------------------------------------------------
-
-
-class TrailingLayout:
-    """Append the block after the last byte of the file; only two FLH words change."""
-
-    name = "trailing"
-
-    def finish_block(
-        self, block: bytes, start_word: int, *, reserve: int, align_sector: bool
-    ) -> bytes:
-        return _payload.pad_block(
-            block, reserve=reserve, start_word=start_word, align_sector=align_sector
+def _require_trailing(info: FileInfo, found: Located) -> None:
+    if not info.is_trailing(found.region):
+        raise FormatError(
+            f"the metadata block ({found.region}) is not at the end of {info.path}; "
+            "the file was probably rewritten by another tool, so it cannot be changed safely"
         )
-
-    def place(self, info: FileInfo, block: bytes) -> tuple[Region, list[Write], list[str]]:
-        start_word = info.end_word
-        section = METADATA_SECTION
-        region = Region(section, start_word, len(block) // WORD_SIZE)
-        start_w, len_w = _section_pointer_words(section)
-        writes = [
-            Write(
-                info.size, block, f"append {region.length}-word metadata block at word {start_word}"
-            ),
-            _pointer_write(info, start_w, region.start, f"{section} start"),
-            _pointer_write(info, len_w, region.length, f"{section} length"),
-        ]
-        return region, writes, []
 
 
 # --- add --------------------------------------------------------------------
@@ -319,14 +293,12 @@ def plan_add(
     meta: Mapping[str, Any],
     *,
     with_hash: bool = True,
-    reserve: int = 0,
     align_sector: bool = False,
     force: bool = False,
 ) -> Plan:
     """Compute, without writing, what :func:`add` would do."""
     if not isinstance(meta, Mapping):
         raise TypeError("meta must be a mapping (JSON object)")
-    strategy = TrailingLayout()
     target = Path(path)
     with open(target, "rb") as fh:
         info = inspect(fh, path=target)
@@ -340,13 +312,16 @@ def plan_add(
         original_size=info.size,
         original_sha256=digest,
     )
-    block = strategy.finish_block(
-        _payload.encode(env), info.end_word, reserve=reserve, align_sector=align_sector
+    block = _payload.pad_block(
+        _payload.encode(env), start_word=info.end_word, align_sector=align_sector
     )
-    region, writes, notes = strategy.place(info, block)
-    return Plan(
-        "add", target, section, info.size, info.size + len(block), writes, notes=notes, envelope=env
-    )
+    n_words = len(block) // WORD_SIZE
+    writes = [
+        Write(info.size, block, f"append {n_words}-word metadata block at word {info.end_word}"),
+        _pointer_write(info, start_w, info.end_word, f"{section} start"),
+        _pointer_write(info, len_w, n_words, f"{section} length"),
+    ]
+    return Plan("add", target, section, info.size, info.size + len(block), writes, envelope=env)
 
 
 def _check_envelope_written(plan: Plan) -> Callable[[Path], None]:
@@ -368,18 +343,16 @@ def add(
     *,
     output: PathLike | None = None,
     with_hash: bool = True,
-    reserve: int = 0,
     align_sector: bool = False,
     force: bool = False,
 ) -> Path:
     """Embed ``meta`` (a JSON object) in ``path``.
 
-    The block is appended at the end of the file in ``temp_historyfile``;
+    The block is always appended at the end of the file in ``temp_historyfile``;
     only its two pointer words change. With
     ``output`` the file is copied first and the original is untouched.
-    ``reserve`` keeps extra zero bytes inside the block so a later
-    :func:`edit` can grow in place; ``align_sector`` pads the block to end on
-    a 2048-word boundary; ``force`` skips the "file looks truncated" check.
+    ``align_sector`` pads the block to end on a 2048-word boundary; ``force``
+    skips the "file looks truncated" check.
 
     Returns the path of the modified file.
     """
@@ -390,7 +363,6 @@ def add(
             target,
             meta,
             with_hash=with_hash,
-            reserve=reserve,
             align_sector=align_sector,
             force=force,
         ),
@@ -445,10 +417,6 @@ def _new_meta(
     return result
 
 
-def _zero_fill(region: Region, note: str) -> Write:
-    return Write(region.offset, b"\0" * region.nbytes, note)
-
-
 def plan_edit(
     path: PathLike,
     changes: Mapping[str, Any] | None = None,
@@ -461,12 +429,13 @@ def plan_edit(
     with open(target, "rb") as fh:
         info = inspect(fh, path=target)
         found = _locate(fh, info)
+    _require_trailing(info, found)
     env = dict(found.envelope)
     env["meta"] = _new_meta(env["meta"], changes, replace, unset)
     env["modified"] = _payload.utcnow_iso()
     block = _payload.encode(env)
     region = found.region
-    start_w, len_w = _section_pointer_words(found.section)
+    _, len_w = _section_pointer_words(found.section)
     new_words = len(block) // WORD_SIZE
     plan = Plan("edit", target, found.section, info.size, info.size, envelope=env)
     if new_words <= region.length:
@@ -479,7 +448,7 @@ def plan_edit(
             )
         )
         plan.notes.append("new payload fits in the existing block; pointers unchanged")
-    elif info.is_trailing(region):
+    else:
         plan.writes.append(
             Write(
                 region.offset,
@@ -490,25 +459,6 @@ def plan_edit(
         plan.writes.append(_pointer_write(info, len_w, new_words, f"{found.section} length"))
         plan.size_after = region.offset + len(block)
         plan.notes.append("block is at the end of the file; it grows in place")
-    else:
-        new_region = Region(found.section, info.end_word, new_words)
-        plan.writes.append(_zero_fill(region, f"zero-fill old block at word {region.start}"))
-        plan.writes.append(
-            Write(
-                info.size,
-                block,
-                f"append {new_words}-word metadata block at word {new_region.start}",
-            )
-        )
-        plan.writes.append(
-            _pointer_write(info, start_w, new_region.start, f"{found.section} start")
-        )
-        plan.writes.append(_pointer_write(info, len_w, new_words, f"{found.section} length"))
-        plan.size_after = info.size + len(block)
-        plan.notes.append(
-            "new payload does not fit and the block is not at the end of the file: "
-            "old block zero-filled, new block appended"
-        )
     return plan
 
 
@@ -524,9 +474,9 @@ def edit(
 
     ``replace`` swaps the whole metadata object, then ``changes`` is
     deep-merged into it, then the dotted keys in ``unset`` are deleted
-    (missing keys are ignored).  The block is rewritten in place when the new
-    payload fits (or when it is the last thing in the file); otherwise the old
-    block is zero-filled and a new one appended.
+    (missing keys are ignored).  The block must be the last thing in the file
+    (otherwise :class:`FormatError` is raised); it is rewritten in place and
+    grows at the end of the file when the new payload is larger.
     """
     plan = _run(
         path,
@@ -546,27 +496,21 @@ def plan_remove(path: PathLike) -> Plan:
     with open(target, "rb") as fh:
         info = inspect(fh, path=target)
         found = _locate(fh, info)
+    _require_trailing(info, found)
     region = found.region
     start_w, len_w = _section_pointer_words(found.section)
     orig = found.envelope["original_header"]
     plan = Plan("remove", target, found.section, info.size, info.size, envelope=found.envelope)
     plan.writes.append(_pointer_write(info, start_w, orig["start"], f"{found.section} start"))
     plan.writes.append(_pointer_write(info, len_w, orig["length"], f"{found.section} length"))
-    if info.is_trailing(region):
-        plan.truncate_to = region.offset
-        plan.size_after = region.offset
-        plan.notes.append("block is at the end of the file; it is truncated away")
-        if region.offset != found.envelope["original_size"]:
-            plan.notes.append(
-                "the file content before the block differs in size from the pre-add file "
-                "(it was rewritten by another tool or the block was relocated by edit), so "
-                "the result is not byte-identical to the file before the metadata was added"
-            )
-    else:
-        plan.writes.append(_zero_fill(region, f"zero-fill metadata block at word {region.start}"))
+    plan.truncate_to = region.offset
+    plan.size_after = region.offset
+    plan.notes.append("block is at the end of the file; it is truncated away")
+    if region.offset != found.envelope["original_size"]:
         plan.notes.append(
-            "block is not at the end of the file: it is zero-filled in place, so the "
-            "result is not byte-identical to the file before the metadata was added"
+            "the file content before the block differs in size from the pre-add file "
+            "(it was rewritten by another tool), so the result is not byte-identical "
+            "to the file before the metadata was added"
         )
     return plan
 
@@ -594,23 +538,17 @@ def _check_removed(plan: Plan) -> Callable[[Path], None]:
 def remove(path: PathLike, *, output: PathLike | None = None) -> Path:
     """Remove the metadata block and restore the section's pointer words.
 
-    When the block is the last thing in the file the result is byte-identical
-    to the file before :func:`add`; otherwise the block is zero-filled in
-    place and a :class:`FfmetaWarning` is issued.
+    The block must be the last thing in the file (otherwise :class:`FormatError`
+    is raised) and is truncated away. If the file was rewritten after
+    :func:`add`, the result differs from the pre-add file and a
+    :class:`FfmetaWarning` is issued.
     """
     plan = _run(path, output, plan_remove, _check_removed)
     assert plan.envelope is not None
-    if plan.truncate_to is None:
+    if plan.size_after != plan.envelope["original_size"]:
         warnings.warn(
-            f"{plan.path}: the metadata block was not at the end of the file; it has been "
-            "zero-filled in place, so the file is not byte-identical to the pre-add file",
-            FfmetaWarning,
-            stacklevel=2,
-        )
-    elif plan.size_after != plan.envelope["original_size"]:
-        warnings.warn(
-            f"{plan.path}: the file was rewritten (or the block relocated) after the metadata "
-            "was added, so the result is not byte-identical to the pre-add file",
+            f"{plan.path}: the file was rewritten after the metadata was added, so the "
+            "result is not byte-identical to the pre-add file",
             FfmetaWarning,
             stacklevel=2,
         )

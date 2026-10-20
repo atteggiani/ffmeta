@@ -5,7 +5,7 @@ Block layout (big-endian 64-bit words):
 * word 1: the 8 ASCII bytes ``FFMETA01`` (magic ``FFMETA`` + format version ``01``);
 * word 2: N, the length in bytes of the JSON text;
 * words 3..: the JSON text, ASCII only, zero-padded to whole words, optionally
-  followed by more zero words (reserve / sector alignment).
+  followed by more zero words (sector alignment).
 
 Because every payload byte is ASCII (< 0x80) the sign bit of every word is
 clear and no word can be read as NaN or Inf by a reader that interprets the
@@ -35,7 +35,6 @@ MAGIC = MAGIC_PREFIX + b"%02d" % FORMAT_VERSION
 HEADER_WORDS = 2
 HEADER_BYTES = HEADER_WORDS * WORD_SIZE
 ENVELOPE_VERSION = 1
-LAYOUTS = ("trailing",)
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 _REQUIRED_KEYS = (
@@ -164,13 +163,9 @@ def encode(env: Mapping[str, Any]) -> bytes:
     return MAGIC + len(data).to_bytes(WORD_SIZE, "big", signed=True) + data + b"\0" * pad
 
 
-def pad_block(
-    block: bytes, *, reserve: int = 0, start_word: int | None = None, align_sector: bool = False
-) -> bytes:
-    """Append zero words for ``reserve`` bytes and/or to end on a 2048-word sector boundary."""
-    if reserve < 0:
-        raise ValueError("reserve must be >= 0")
-    total = len(block) + reserve
+def pad_block(block: bytes, *, start_word: int | None = None, align_sector: bool = False) -> bytes:
+    """Append zero words so the block ends on a 2048-word sector boundary (if requested)."""
+    total = len(block)
     total += (-total) % WORD_SIZE
     if align_sector:
         if start_word is None:

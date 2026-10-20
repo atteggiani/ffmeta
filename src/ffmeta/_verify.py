@@ -168,7 +168,8 @@ def _check_section(report: Report, path: Path, info: FileInfo) -> Located | None
         where = "the block is the last component of the file"
     else:
         where = (
-            "the block is in the middle of the file (file was probably rewritten by another tool)"
+            "the block is NOT at the end of the file (rewritten by another tool); "
+            "edit and remove will refuse to change it"
         )
     report.add(PASS, "section", f"metadata found in {region}; {where}")
     return found
@@ -298,8 +299,7 @@ def _check_reversible(
         report.add(
             SKIP,
             "reversible",
-            "block is not at the end of the file; remove would zero-fill "
-            "it rather than restore the original bytes",
+            "block is not at the end of the file; remove would refuse to change it",
         )
         return
     with tempfile.TemporaryDirectory(prefix="ffmeta-verify-") as tmp:

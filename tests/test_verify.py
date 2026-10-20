@@ -102,8 +102,9 @@ def test_bad_version_payload(pair):
 
 
 def test_trailing_nonzero_words_warn(ff_file):
-    ffmeta.add(ff_file, {"a": 1}, reserve=64)
+    ffmeta.add(ff_file, {"a": 1}, align_sector=True)
     start, length = read_word(ff_file, 135), read_word(ff_file, 136)
+    assert length > p.payload_words(p.declared_length(ff_file.read_bytes()[(start - 1) * 8 :]))
     write_word(ff_file, start + length - 1, 42)
     checks = by_name(ffmeta.verify(ff_file))
     assert checks["payload"].status == WARN
@@ -156,13 +157,13 @@ def test_block_in_the_middle(tmp_path):
         original_size=1234,
         original_sha256="a" * 64,
     )
-    block = p.pad_block(p.encode(env), reserve=16)
+    block = p.pad_block(p.encode(env))
     target = make_um_file(tmp_path / "mid.ff", temp_historyfile=block)
     original = make_um_file(tmp_path / "orig.ff")
     report = ffmeta.verify(target, original=original)
     checks = by_name(report)
     assert checks["section"].status == PASS
-    assert "rewritten by another tool" in checks["section"].message
+    assert "NOT at the end" in checks["section"].message
     assert checks["overlap"].status == PASS
     assert checks["payload"].status == PASS
     assert checks["hash"].status == SKIP

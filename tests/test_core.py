@@ -138,10 +138,10 @@ def test_numpy_values_are_converted(ff_file):
 
 def test_edit_keep_size_in_place(um_file):
     section = "temp_historyfile"
-    ffmeta.add(um_file, {"a": 1, "b": {"c": 2}}, reserve=512)
+    ffmeta.add(um_file, {"a": 1, "b": {"c": 2}} | {"pad": "x" * 500})
     size = um_file.stat().st_size
     start, length = (read_word(um_file, w) for w in pointer_words(section))
-    ffmeta.edit(um_file, {"b": {"d": 3}}, unset=["a", "missing.key"])
+    ffmeta.edit(um_file, {"b": {"d": 3}}, unset=["a", "pad", "missing.key"])
     assert ffmeta.read(um_file) == {"b": {"c": 2, "d": 3}}
     assert um_file.stat().st_size == size
     assert (
@@ -178,20 +178,35 @@ def test_edit_grow_trailing_block(um_file):
     assert um_file.read_bytes() == original
 
 
-def test_reserve_allows_growth_in_place(ff_file):
-    ffmeta.add(ff_file, {"a": 1}, reserve=4096)
+def test_edit_shrink_keeps_block_size(ff_file):
+    ffmeta.add(ff_file, {"a": 1, "pad": "y" * 3000})
     size = ff_file.stat().st_size
-    ffmeta.edit(ff_file, {"pad": "y" * 3000})
+    ffmeta.edit(ff_file, unset=["pad"])
     assert ff_file.stat().st_size == size
-    # the reserve is counted in words and preserved
-    env_len = read_word(ff_file, 136)
-    assert env_len * WORD_SIZE >= 4096
+    assert ffmeta.read(ff_file) == {"a": 1}
 
 
 def test_align_sector(um_file):
     ffmeta.add(um_file, {"a": 1}, align_sector=True)
     assert (um_file.stat().st_size // WORD_SIZE) % 2048 == 0
     ffmeta.remove(um_file)
+
+
+def fake_original_size(path):
+    """Change the stored original size in place, as if the file was rewritten after add."""
+    size = ffmeta.read(path, envelope=True)["original_size"]
+    old, new = f'"original_size":{size}'.encode(), f'"original_size":{size + 1}'.encode()
+    assert len(old) == len(new)
+    path.write_bytes(path.read_bytes().replace(old, new))
+
+
+def test_remove_warns_when_file_was_rewritten(ff_file):
+    ffmeta.add(ff_file, {"a": 1})
+    fake_original_size(ff_file)
+    assert "not byte-identical" in core_module.plan_remove(ff_file).describe()
+    with pytest.warns(ffmeta.FfmetaWarning, match="not byte-identical"):
+        ffmeta.remove(ff_file)
+    assert not ffmeta.has_metadata(ff_file)
 
 
 # --- refusals ---------------------------------------------------------------
@@ -371,20 +386,20 @@ def test_removed_self_check_rejects_inconsistent_results(ff_file, tmp_path):
 # --- block not at the end of the file ---------------------------------------
 
 
-def canonical_block(meta, section="temp_historyfile", reserve=0):
+def canonical_block(meta, section="temp_historyfile"):
     env = p.make_envelope(
         meta,
         original_header={"start": IMDI, "length": IMDI},
         original_size=0,
         original_sha256=None,
     )
-    return p.pad_block(p.encode(env), reserve=reserve)
+    return p.pad_block(p.encode(env))
 
 
 @pytest.fixture
 def middle_file(tmp_path, section):
     """A file whose metadata block sits in its canonical position before LOOKUP."""
-    block = canonical_block({"where": "middle"}, section=section, reserve=64)
+    block = canonical_block({"where": "middle"}, section=section)
     return make_um_file(tmp_path / "middle.ff", **{section: block})
 
 
@@ -395,58 +410,13 @@ def test_middle_read(middle_file, section):
     assert region is not None and not info.is_trailing(region)
 
 
-def test_middle_edit_fits(middle_file, section):
-    size = middle_file.stat().st_size
-    start, length = (read_word(middle_file, w) for w in pointer_words(section))
-    ffmeta.edit(middle_file, {"x": 1})
-    assert ffmeta.read(middle_file) == {"where": "middle", "x": 1}
-    assert middle_file.stat().st_size == size
-    assert (
-        read_word(middle_file, pointer_words(section)[0]),
-        read_word(middle_file, pointer_words(section)[1]),
-    ) == (start, length)
-
-
-def test_middle_edit_does_not_fit(middle_file, section):
+def test_middle_edit_and_remove_refused(middle_file):
     before = middle_file.read_bytes()
-    start, length = (read_word(middle_file, w) for w in pointer_words(section))
-    ffmeta.edit(middle_file, {"big": "z" * 2000})
-    after = middle_file.read_bytes()
-    assert ffmeta.read(middle_file)["big"] == "z" * 2000
-    assert len(after) > len(before)
-    # old block zero-filled, following data unchanged, pointers moved to the new tail
-    old_off = (start - 1) * WORD_SIZE
-    assert after[old_off : old_off + length * WORD_SIZE] == b"\0" * (length * WORD_SIZE)
-    assert (
-        after[old_off + length * WORD_SIZE : len(before)] == before[old_off + length * WORD_SIZE :]
-    )
-    assert read_word(middle_file, pointer_words(section)[0]) == len(before) // WORD_SIZE + 1
-    assert (
-        read_word(middle_file, pointer_words(section)[1]) == (len(after) - len(before)) // WORD_SIZE
-    )
-
-
-def test_middle_remove_zero_fills_and_warns(middle_file, section):
-    before = middle_file.read_bytes()
-    start, length = (read_word(middle_file, w) for w in pointer_words(section))
-    with pytest.warns(ffmeta.FfmetaWarning, match="not byte-identical"):
+    with pytest.raises(ffmeta.FormatError, match="not at the end"):
+        ffmeta.edit(middle_file, {"x": 1})
+    with pytest.raises(ffmeta.FormatError, match="not at the end"):
         ffmeta.remove(middle_file)
-    after = middle_file.read_bytes()
-    assert len(after) == len(before)
-    off = (start - 1) * WORD_SIZE
-    assert after[off : off + length * WORD_SIZE] == b"\0" * (length * WORD_SIZE)
-    assert (
-        read_word(middle_file, pointer_words(section)[0]),
-        read_word(middle_file, pointer_words(section)[1]),
-    ) == (IMDI, IMDI)
-    assert not ffmeta.has_metadata(middle_file)
-    # everything else untouched
-    a = np.frombuffer(before, dtype=">i8").copy()
-    b = np.frombuffer(after, dtype=">i8")
-    a[start - 1 : start - 1 + length] = 0
-    for w in pointer_words(section):
-        a[w - 1] = IMDI
-    assert np.array_equal(a, b)
+    assert middle_file.read_bytes() == before
 
 
 # --- plans / dry run ----------------------------------------------------------

@@ -107,8 +107,6 @@ def test_add_from_json_file_and_stdin(ff_file, tmp_path, capsys, monkeypatch):
         ff_file,
         "--json-file",
         "-",
-        "--reserve",
-        "100",
         "--align-sector",
         "--no-hash",
     )
@@ -179,7 +177,7 @@ def test_verify_exit_codes(ff_file, tmp_path, capsys):
     }
 
 
-def test_remove_warning_goes_to_stderr(tmp_path, capsys):
+def test_edit_remove_refuse_block_not_at_end(tmp_path, capsys):
     from ffmeta import payload as p
     from ffmeta._layout import IMDI
 
@@ -191,6 +189,15 @@ def test_remove_warning_goes_to_stderr(tmp_path, capsys):
     )
     path = make_um_file(tmp_path / "mid.ff", temp_historyfile=p.encode(env))
     code, out, err = run(capsys, "remove", path)
+    assert code == 2 and "not at the end" in err
+
+
+def test_remove_warning_goes_to_stderr(ff_file, capsys):
+    from test_core import fake_original_size
+
+    ffmeta.add(ff_file, {"a": 1})
+    fake_original_size(ff_file)
+    code, out, err = run(capsys, "remove", ff_file)
     assert code == 0 and "removed" in out
     assert "ffmeta: warning:" in err and "not byte-identical" in err
 

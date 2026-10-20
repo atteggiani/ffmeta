@@ -17,8 +17,8 @@ All notable changes to this project are documented here. The format follows
 - Trailing layout: the block is appended at the end of the file in
   `temp_historyfile`; only its two pointer words change and `remove` restores
   the original file byte for byte.
-- Pointer-based `read`/`edit`/`remove` for blocks that are no longer last
-  (e.g. after a Mule rewrite).
+- Pointer-based `read` for blocks that are no longer last (e.g. after a Mule
+  rewrite); `edit` and `remove` require the block to be at the end of the file.
 - Transactional writes: pre-validation, in-memory undo, `fsync`, re-open
   self-check and rollback; `--dry-run`; `-o/--output`.
 - `verify` with file-only, `--original`, `--mule` and `--iris` tiers.

@@ -108,15 +108,14 @@ def test_metadata_survives_to_file(pair, tmp_path, mule_seeks):
     finally:
         close(umf)
     assert ffmeta.read(out) == meta
-    # after the rewrite the block is in its canonical position: still editable/removable
+    # after the rewrite the block is in its canonical position: readable, but not changeable
     report = ffmeta.verify(out)
     assert report.ok, str(report)
-    assert "rewritten by another tool" in by_name(report)["section"].message
-    ffmeta.edit(out, {"after": "mule"})
-    assert ffmeta.read(out)["after"] == "mule"
-    with pytest.warns(ffmeta.FfmetaWarning):
+    assert "NOT at the end" in by_name(report)["section"].message
+    with pytest.raises(ffmeta.FormatError, match="not at the end"):
+        ffmeta.edit(out, {"after": "mule"})
+    with pytest.raises(ffmeta.FormatError, match="not at the end"):
         ffmeta.remove(out)
-    assert not ffmeta.has_metadata(out)
     again = load(out)
     try:
         assert len(again.fields) == 3

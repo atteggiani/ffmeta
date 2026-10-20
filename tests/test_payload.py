@@ -43,22 +43,20 @@ def test_encode_decode_roundtrip(sample_meta):
 
 
 def test_encoded_words_contain_no_nan_or_inf(sample_meta):
-    block = p.pad_block(p.encode(env_for(sample_meta)), reserve=100)
+    block = p.pad_block(p.encode(env_for(sample_meta)), start_word=5, align_sector=True)
     assert p.words_as_floats_are_finite(block)
     assert np.all(np.frombuffer(block, dtype=">i8") >= 0)
 
 
 def test_padding_and_alignment(sample_meta):
     block = p.encode(env_for(sample_meta))
-    padded = p.pad_block(block, reserve=13)
-    assert len(padded) >= len(block) + 13 and len(padded) % WORD_SIZE == 0
+    padded = p.pad_block(block)
+    assert len(padded) == len(block) and len(padded) % WORD_SIZE == 0
     assert p.trailing_is_zero(padded, p.declared_length(padded))
     aligned = p.pad_block(block, start_word=4097 + 5, align_sector=True)
     assert ((4097 + 5 - 1) + len(aligned) // WORD_SIZE) % 2048 == 0
     with pytest.raises(ValueError):
         p.pad_block(block, align_sector=True)
-    with pytest.raises(ValueError):
-        p.pad_block(block, reserve=-1)
 
 
 def test_unknown_magic_is_no_metadata(sample_meta):

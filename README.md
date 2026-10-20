@@ -28,7 +28,7 @@ Mule is not on PyPI. To run the Mule checks and tests, clone it and put
 ```sh
 ffmeta add run.ff --set experiment=u-ab123 --set source.doi=10.1234/xyz
 ffmeta add run.ff --json '{"project": "ACCESS", "contact": "me@example.org"}'
-ffmeta add run.ff --json-file meta.json --reserve 4096 -o run_with_meta.ff
+ffmeta add run.ff --json-file meta.json -o run_with_meta.ff
 ffmeta read run.ff                       # pretty JSON
 ffmeta read run.ff --key source.doi --raw
 ffmeta read run.ff --envelope            # the full stored envelope
@@ -41,8 +41,7 @@ ffmeta verify run.ff -O run_original.ff --mule --iris
 - `--set a.b=3` creates nested keys; the value is parsed as JSON when possible
   and kept as a string otherwise. `--set` can be combined with `--json` /
   `--json-file` (`--set` wins). `--json-file -` reads stdin.
-- `--reserve BYTES` keeps zero padding inside the block so later edits can
-  grow in place; `--align-sector` pads to a 2048-word sector boundary.
+- `--align-sector` pads the block to a 2048-word sector boundary.
 - `-o OUT` copies the file first and leaves the source untouched; `--dry-run`
   prints what would change and writes nothing.
 - Exit status: 0 success; 1 for `read` without metadata or any failed `verify`
@@ -71,7 +70,7 @@ ffmeta.from_mule(mule.load_umfile("run.ff"))  # decode from a loaded Mule object
 Signatures:
 
 ```python
-add(path, meta, *, output=None, with_hash=True, reserve=0, align_sector=False,
+add(path, meta, *, output=None, with_hash=True, align_sector=False,
   force=False, dry_run=False) -> Path
 read(path, *, envelope=False) -> dict
 edit(path, changes=None, *, replace=None, unset=(), output=None) -> Path
@@ -85,7 +84,7 @@ Exceptions derive from `FfmetaError`: `FormatError` (not a 64-bit big-endian
 UM file, truncated, inconsistent pointers), `NoMetadataError`,
 `MetadataExistsError`, `SectionInUseError`, `CorruptMetadataError`.
 `remove` issues an `FfmetaWarning` when the result cannot be byte-identical to
-the pre-`add` file (block no longer at the end, see below).
+the pre-`add` file (it was rewritten after `add`, see below).
 
 ## What changes in the file
 
@@ -115,11 +114,9 @@ Every component, every LOOKUP entry (so every `LBEGIN`/`LBNREC`) and all field
 data stay where they were.
 
 If another tool rewrites the file (Mule's `to_file` puts the section in its
-canonical position before LOOKUP), the block is no longer last. `read`, `edit`
-and `remove` still work by pointer: `edit` rewrites in place when the new
-payload fits, otherwise zero-fills the old block and appends a new one;
-`remove` zero-fills the block in place, restores the pointer words and warns
-that the file is not byte-identical to the pre-`add` file.
+canonical position before LOOKUP), the block is no longer last. `read` and
+`verify` still work by pointer, but `edit` and `remove` refuse to change the
+file (`FormatError`), because the block is only ever written at the end.
 
 ### Safety
 
@@ -138,7 +135,7 @@ Big-endian 64-bit words:
 |---|---|
 | 1 | magic + version: the 8 ASCII bytes `FFMETA01` |
 | 2 | N, the length in bytes of the JSON text |
-| 3.. | the JSON text, ASCII only (`ensure_ascii`, sorted keys, compact, no NaN/Inf), zero-padded to whole words, then optional zero words (`--reserve`, `--align-sector`) |
+| 3.. | the JSON text, ASCII only (`ensure_ascii`, sorted keys, compact, no NaN/Inf), zero-padded to whole words, then optional zero words (`--align-sector`) |
 
 Because the text is ASCII, no word read as a float is NaN or Inf. The JSON is
 an envelope:
@@ -167,7 +164,7 @@ check and a summary; exits 1 on any FAIL.
 | tier | check | what it tests |
 |---|---|---|
 | file alone | `header` | size multiple of 8, 64-bit big-endian UM file, plausible dataset type |
-| | `section` | metadata found, pointers inside the file, block last or "rewritten by another tool" |
+| | `section` | metadata found, pointers inside the file, block last or "not at the end" |
 | | `overlap` | block overlaps no component, no LOOKUP, no field (bounded by `LBEGIN`/`LBNREC`, not word 161) |
 | | `payload` | magic/version, declared length, JSON, envelope schema, trailing words zero (WARN) |
 | | `hash` | SHA-256 of the virtually removed file equals the stored digest (mismatch is WARN) |
