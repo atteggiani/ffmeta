@@ -37,12 +37,12 @@ def close(umf):
 
 
 @pytest.fixture
-def pair(tmp_path, kind, section):
+def pair(tmp_path, kind):
     original = make_um_file(tmp_path / "orig.ff", kind=kind)
     target = tmp_path / "meta.ff"
     shutil.copyfile(original, target)
     meta = {"experiment": "u-ab123", "levels": [1, 2, 3], "nested": {"ok": True}}
-    ffmeta.add(target, meta, section=section)
+    ffmeta.add(target, meta)
     return original, target, meta
 
 

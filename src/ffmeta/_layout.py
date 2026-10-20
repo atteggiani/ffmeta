@@ -99,9 +99,8 @@ COMPONENTS: tuple[Component, ...] = (
 )
 COMPONENT_BY_NAME: Mapping[str, Component] = {c.name: c for c in COMPONENTS}
 
-#: Sections that may hold ffmeta metadata, in the order they are searched.
-METADATA_SECTIONS: tuple[str, ...] = ("extra_constants", "temp_historyfile")
-DEFAULT_SECTION = "extra_constants"
+#: Header section that holds ffmeta metadata.
+METADATA_SECTION = "temp_historyfile"
 
 
 def word_offset(word: int) -> int:
@@ -261,8 +260,6 @@ def detect_format(head: bytes) -> str:
     """
 
     def plausible(words: np.ndarray) -> bool:
-        if words.size < FLH_WORDS:
-            return False
         dataset_type = int(words[FLH_DATASET_TYPE - 1])
         ptrs = (int(words[99]), int(words[149]))
         return dataset_type in DATASET_TYPES and all(p <= 0 or p > FLH_WORDS for p in ptrs)

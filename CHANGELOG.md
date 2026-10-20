@@ -14,9 +14,9 @@ All notable changes to this project are documented here. The format follows
   (`add`, `read`, `edit`, `remove`, `has_metadata`, `from_mule`, `verify`).
 - `FFMETA01` payload format: magic word, byte length, ASCII-only JSON envelope
   with the original pointer words, original size and SHA-256.
-- Trailing layout: the block is appended at the end of the file and only the
-  two pointer words of `extra_constants` (default) or `temp_historyfile`
-  change; `remove` restores the original file byte for byte.
+- Trailing layout: the block is appended at the end of the file in
+  `temp_historyfile`; only its two pointer words change and `remove` restores
+  the original file byte for byte.
 - Pointer-based `read`/`edit`/`remove` for blocks that are no longer last
   (e.g. after a Mule rewrite).
 - Transactional writes: pre-validation, in-memory undo, `fsync`, re-open

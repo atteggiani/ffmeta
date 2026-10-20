@@ -1,6 +1,7 @@
 """Command line interface: ``ffmeta add|read|edit|remove|verify``."""
 
 from __future__ import annotations
+import ffmeta
 
 import argparse
 import contextlib
@@ -16,9 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from . import payload as _payload
-from ._layout import DEFAULT_SECTION, METADATA_SECTIONS
 from ._verify import verify
-from ._version import __version__
 from .core import add, edit, plan_add, plan_edit, plan_remove, read, remove
 from .errors import FfmetaError, FfmetaWarning, NoMetadataError
 
@@ -46,7 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=_EXAMPLES,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--version", action="version", version=f"ffmeta {__version__}")
+    parser.add_argument("--version", action="version", version=f"ffmeta {ffmeta.__version__}")
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
     sub.required = True
 
@@ -69,16 +68,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_add = sub.add_parser(
         "add",
         help="embed metadata in a file",
-        description="Append a metadata block to FILE and point the chosen header section at it.",
+        description="Append metadata to FILE and point TEMP_HISTORYFILE at it.",
     )
     p_add.add_argument("file", metavar="FILE")
     meta_inputs(p_add, "")
-    p_add.add_argument(
-        "--section",
-        choices=METADATA_SECTIONS,
-        default=DEFAULT_SECTION,
-        help=f"header section to use (default: {DEFAULT_SECTION})",
-    )
     p_add.add_argument(
         "--reserve",
         type=int,
@@ -111,7 +104,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_read.add_argument("--raw", action="store_true", help="print strings without JSON quoting")
     p_read.add_argument("--compact", action="store_true", help="single-line JSON")
     p_read.add_argument("--envelope", action="store_true", help="print the whole envelope")
-    p_read.add_argument("--section", choices=METADATA_SECTIONS, help="look only in this section")
     p_read.set_defaults(func=cmd_read)
 
     p_edit = sub.add_parser(
@@ -218,7 +210,6 @@ def cmd_add(args: argparse.Namespace) -> int:
     if meta is None:
         raise ValueError("no metadata given: use --json, --json-file or --set")
     kwargs = dict(
-        section=args.section,
         with_hash=not args.no_hash,
         reserve=args.reserve,
         align_sector=args.align_sector,
@@ -234,7 +225,7 @@ def cmd_add(args: argparse.Namespace) -> int:
 
 def cmd_read(args: argparse.Namespace) -> int:
     try:
-        value: Any = read(args.file, envelope=args.envelope, section=args.section)
+        value: Any = read(args.file, envelope=args.envelope)
     except NoMetadataError as exc:
         print(f"ffmeta: {exc}", file=sys.stderr)
         return EXIT_NOT_FOUND

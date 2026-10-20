@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import io
+
 import numpy as np
 import pytest
 
@@ -9,9 +11,12 @@ from ffmeta import FormatError
 from ffmeta._layout import (
     COMPONENTS,
     FLH_BYTES,
+    FLH_WORDS,
     IMDI,
+    FieldExtent,
     FixedLengthHeader,
     Region,
+    _read_exact,
     detect_format,
     inspect,
     sha256_range,
@@ -50,6 +55,24 @@ def test_flh_indexing_is_one_based(ff_file):
         flh[257]
 
 
+def test_fixed_header_validation_and_copy():
+    with pytest.raises(FormatError, match="must have 256 words"):
+        FixedLengthHeader(np.zeros(FLH_WORDS - 1, dtype=">i8"))
+    with pytest.raises(FormatError, match="too short"):
+        FixedLengthHeader.from_bytes(b"short")
+
+    flh = FixedLengthHeader(np.zeros(FLH_WORDS, dtype=">i8"))
+    flh[5] = 3
+    copied = flh.copy()
+    assert copied.to_bytes() == flh.to_bytes()
+    words = flh.words
+    words[4] = 4
+    assert flh.dataset_type == 3
+    assert flh.grid_staggering == 0
+    with pytest.raises(IndexError):
+        flh[FLH_WORDS + 1] = 0
+
+
 def test_two_dimensional_component_length(ff_file):
     info = inspect(ff_file)
     ldc = info.flh.component_region("level_dependent_constants")
@@ -59,6 +82,7 @@ def test_two_dimensional_component_length(ff_file):
 
 def test_inspect_reads_lookup_extents(ff_file):
     info = inspect(ff_file)
+    assert info.lookup_region() == info.flh.component_region("lookup")
     assert len(info.fields) == 3
     data_start = info.flh[160]
     assert (data_start - 1) % 2048 == 0
@@ -91,6 +115,9 @@ def test_detect_format(ff_file, tmp_path):
     assert detect_format(le.read_bytes()[:FLH_BYTES]) == "le64"
     be32 = to_32bit_file(ff_file, tmp_path / "be32.ff")
     assert detect_format(be32.read_bytes()[:FLH_BYTES]) == "be32"
+    words = np.frombuffer(ff_file.read_bytes()[:FLH_BYTES], dtype=">i8")
+    (tmp_path / "le32.ff").write_bytes(words.astype("<i4").tobytes())
+    assert detect_format((tmp_path / "le32.ff").read_bytes()) == "le32"
     assert detect_format(b"\0" * FLH_BYTES) == "unknown"
     assert detect_format(b"abc") == "unknown"
 
@@ -125,6 +152,68 @@ def test_inspect_strict_pointer_problems(ff_file):
     assert info.problems
 
 
+def test_lookup_pointer_edge_cases(ff_file):
+    lookup_start = read_word(ff_file, 150)
+    with open(ff_file, "rb") as fh:
+        absent = FixedLengthHeader.from_bytes(fh.read(FLH_BYTES))
+    absent[150] = IMDI
+    assert absent.component_region("lookup") is None
+    write_word(ff_file, 150, IMDI)
+    assert inspect(ff_file).fields == []
+    write_word(ff_file, 150, lookup_start)
+
+    write_word(ff_file, 151, 63)
+    with pytest.raises(FormatError, match="entry length"):
+        inspect(ff_file)
+    assert inspect(ff_file, strict=False).problems
+
+    write_word(ff_file, 151, 64)
+    write_word(ff_file, 152, -1)
+    with pytest.raises(FormatError, match="outside the file"):
+        inspect(ff_file)
+
+    write_word(ff_file, 152, 0)
+    info = inspect(ff_file)
+    assert info.fields == []
+
+    write_word(ff_file, 152, 10_000)
+    info = inspect(ff_file, strict=False)
+    assert any("lookup table points outside" in problem for problem in info.problems)
+
+
+def test_lookup_supports_128_word_entries(ff_file):
+    write_word(ff_file, 151, 128)
+    write_word(ff_file, 152, 1)
+    info = inspect(ff_file)
+    assert len(info.fields) == 1
+
+
+def test_inspect_file_object_and_exact_read(ff_file):
+    with open(ff_file, "rb") as fh:
+        info = inspect(fh)
+    assert info.path == ff_file
+    with pytest.raises(FormatError, match="unexpected end of file"):
+        _read_exact(io.BytesIO(b"abc"), 0, 4)
+    from ffmeta._layout import iter_chunks
+
+    chunks = iter_chunks(io.BytesIO(b"a"), 0, 2)
+    assert next(chunks) == b"a"
+    with pytest.raises(FormatError, match="unexpected end of file"):
+        next(chunks)
+
+
+def test_non_strict_inspect_reports_data_past_eof(ff_file):
+    write_word(ff_file, 160, ff_file.stat().st_size // 8 + 100)
+    info = inspect(ff_file, strict=False)
+    assert any("data starts" in problem for problem in info.problems)
+
+
+def test_non_strict_inspect_reports_data_inside_header(ff_file):
+    write_word(ff_file, 160, 200)
+    info = inspect(ff_file, strict=False)
+    assert any("data starts at word 200" in problem for problem in info.problems)
+
+
 def test_region_overlap():
     a = Region("a", 10, 5)
     b = Region("b", 14, 3)
@@ -133,6 +222,13 @@ def test_region_overlap():
     assert not a.overlaps(c)
     assert not a.overlaps(Region("empty", 12, 0))
     assert a.end == 15 and a.offset == 72 and a.nbytes == 40
+
+
+def test_field_extent_address_and_length_fallbacks():
+    assert FieldExtent(0, -99, 10, 0, 5, 8).region is None
+    assert FieldExtent(1, 3, 10, 0, 0, 8).region is None
+    assert FieldExtent(2, 3, 10, 0, 5, 0).region == Region("field[2]", 6, 10)
+    assert FieldExtent(3, 3, -1, 0, 5, 0).region == Region("field[3]", 6, 0)
 
 
 def test_sha256_range_with_patches(tmp_path):

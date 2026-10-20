@@ -47,3 +47,6 @@ coverage.xml
 
 # AI Agents
 .agent.md
+
+# Miscellaneous
+umfiles_for_testing/

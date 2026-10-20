@@ -2,12 +2,8 @@
 
 Layout strategies
 -----------------
-Where a new block is placed is decided by a :class:`Layout` object.  The only
-strategy implemented is :class:`TrailingLayout` (append the block at the end
-of the file and change just the two pointer words of the chosen section).  An
-``inline`` strategy that puts the block in its canonical position before the
-LOOKUP table can be added by subclassing :class:`Layout` and registering it in
-:data:`LAYOUTS`.
+New blocks use :class:`TrailingLayout`: they are appended after the last byte
+of the file, and the two pointer words for ``temp_historyfile`` are updated.
 
 Reading, editing and removing work purely by pointer, so they do not depend on
 where the block currently is (e.g. after Mule has rewritten the file).
@@ -30,8 +26,7 @@ import numpy as np
 from . import payload as _payload
 from ._layout import (
     COMPONENT_BY_NAME,
-    DEFAULT_SECTION,
-    METADATA_SECTIONS,
+    METADATA_SECTION,
     WORD_SIZE,
     FileInfo,
     PathLike,
@@ -62,9 +57,7 @@ __all__ = [
     "plan_edit",
     "plan_remove",
     "Plan",
-    "Layout",
     "TrailingLayout",
-    "LAYOUTS",
 ]
 
 _READ_LIMIT = 1 << 26  # refuse to read blocks larger than 64 MiB in one go
@@ -232,27 +225,19 @@ def _read_block(fh: BinaryIO, region: Region) -> tuple[dict[str, Any], int]:
     return _payload.decode(block), length
 
 
-def _locate(fh: BinaryIO, info: FileInfo, section: str | None = None) -> Located:
-    sections = _check_section(section) if section else METADATA_SECTIONS
-    for name in sections:
-        region = info.flh.component_region(name)
-        if region is None:
-            continue
-        if region.end > info.end_word:
-            raise FormatError(f"{region} extends past the end of the file")
-        try:
-            env, length = _read_block(fh, region)
-        except NoMetadataError:
-            continue
-        return Located(name, region, env, length)
-    where = f"section {section}" if section else "any supported section"
-    raise NoMetadataError(f"no ffmeta metadata found in {where} of {info.path}")
-
-
-def _check_section(section: str) -> tuple[str, ...]:
-    if section not in METADATA_SECTIONS:
-        raise ValueError(f"unknown section {section!r}; choose from {', '.join(METADATA_SECTIONS)}")
-    return (section,)
+def _locate(fh: BinaryIO, info: FileInfo) -> Located:
+    region = info.flh.component_region(METADATA_SECTION)
+    if region is None:
+        raise NoMetadataError(f"no ffmeta metadata found in {METADATA_SECTION} of {info.path}")
+    if region.end > info.end_word:
+        raise FormatError(f"{region} extends past the end of the file")
+    try:
+        env, length = _read_block(fh, region)
+    except NoMetadataError:
+        raise NoMetadataError(
+            f"no ffmeta metadata found in {METADATA_SECTION} of {info.path}"
+        ) from None
+    return Located(METADATA_SECTION, region, env, length)
 
 
 def _pointer_write(info: FileInfo, word: int, value: int, label: str) -> Write:
@@ -270,16 +255,10 @@ def _section_pointer_words(section: str) -> tuple[int, int]:
 # --- layout strategies ------------------------------------------------------
 
 
-class Layout:
-    """Strategy deciding where a *new* block goes.  Subclass to add placements."""
+class TrailingLayout:
+    """Append the block after the last byte of the file; only two FLH words change."""
 
-    name = "abstract"
-
-    def place(
-        self, info: FileInfo, section: str, block: bytes
-    ) -> tuple[Region, list[Write], list[str]]:
-        """Return the block region, the writes performing the placement and notes."""
-        raise NotImplementedError
+    name = "trailing"
 
     def finish_block(
         self, block: bytes, start_word: int, *, reserve: int, align_sector: bool
@@ -288,16 +267,9 @@ class Layout:
             block, reserve=reserve, start_word=start_word, align_sector=align_sector
         )
 
-
-class TrailingLayout(Layout):
-    """Append the block after the last byte of the file; only two FLH words change."""
-
-    name = "trailing"
-
-    def place(
-        self, info: FileInfo, section: str, block: bytes
-    ) -> tuple[Region, list[Write], list[str]]:
+    def place(self, info: FileInfo, block: bytes) -> tuple[Region, list[Write], list[str]]:
         start_word = info.end_word
+        section = METADATA_SECTION
         region = Region(section, start_word, len(block) // WORD_SIZE)
         start_w, len_w = _section_pointer_words(section)
         writes = [
@@ -310,13 +282,10 @@ class TrailingLayout(Layout):
         return region, writes, []
 
 
-LAYOUTS: dict[str, Layout] = {TrailingLayout.name: TrailingLayout()}
-
-
 # --- add --------------------------------------------------------------------
 
 
-def _check_can_add(fh: BinaryIO, info: FileInfo, section: str, force: bool) -> None:
+def _check_can_add(fh: BinaryIO, info: FileInfo, force: bool) -> None:
     if not force:
         bad = info.truncated_fields()
         if bad:
@@ -328,54 +297,45 @@ def _check_can_add(fh: BinaryIO, info: FileInfo, section: str, force: bool) -> N
                 f"{region.start}-{region.end - 1} but the file has {info.size_words} words "
                 f"(use force=True / --force to override)"
             )
-    for name in METADATA_SECTIONS:
-        region = info.flh.component_region(name)
-        if region is None:
-            continue
-        try:
-            _read_block(fh, region)
-        except NoMetadataError:
-            if name == section:
-                raise SectionInUseError(
-                    f"section {section} already holds {region.length} words of other data "
-                    f"(starting at word {region.start})"
-                ) from None
-            continue
-        except CorruptMetadataError as exc:
-            raise MetadataExistsError(
-                f"section {name} holds a damaged ffmeta block ({exc}); remove it first"
-            ) from exc
-        raise MetadataExistsError(f"metadata already present in section {name}")
+    region = info.flh.component_region(METADATA_SECTION)
+    if region is None:
+        return
+    try:
+        _read_block(fh, region)
+    except NoMetadataError:
+        raise SectionInUseError(
+            f"section {METADATA_SECTION} already holds {region.length} words of other data "
+            f"(starting at word {region.start})"
+        ) from None
+    except CorruptMetadataError as exc:
+        raise MetadataExistsError(
+            f"section {METADATA_SECTION} holds a damaged ffmeta block ({exc}); remove it first"
+        ) from exc
+    raise MetadataExistsError(f"metadata already present in section {METADATA_SECTION}")
 
 
 def plan_add(
     path: PathLike,
     meta: Mapping[str, Any],
     *,
-    section: str = DEFAULT_SECTION,
     with_hash: bool = True,
     reserve: int = 0,
     align_sector: bool = False,
     force: bool = False,
-    layout: str = TrailingLayout.name,
 ) -> Plan:
     """Compute, without writing, what :func:`add` would do."""
     if not isinstance(meta, Mapping):
         raise TypeError("meta must be a mapping (JSON object)")
-    _check_section(section)
-    if layout not in LAYOUTS:
-        raise ValueError(f"unknown layout {layout!r}; available: {', '.join(LAYOUTS)}")
-    strategy = LAYOUTS[layout]
+    strategy = TrailingLayout()
     target = Path(path)
     with open(target, "rb") as fh:
         info = inspect(fh, path=target)
-        _check_can_add(fh, info, section, force)
+        _check_can_add(fh, info, force)
+        section = METADATA_SECTION
         start_w, len_w = _section_pointer_words(section)
         digest = sha256_range(fh, 0, info.size) if with_hash else None
     env = _payload.make_envelope(
         meta,
-        section=section,
-        layout=strategy.name,
         original_header={"start": info.flh[start_w], "length": info.flh[len_w]},
         original_size=info.size,
         original_sha256=digest,
@@ -383,7 +343,7 @@ def plan_add(
     block = strategy.finish_block(
         _payload.encode(env), info.end_word, reserve=reserve, align_sector=align_sector
     )
-    region, writes, notes = strategy.place(info, section, block)
+    region, writes, notes = strategy.place(info, block)
     return Plan(
         "add", target, section, info.size, info.size + len(block), writes, notes=notes, envelope=env
     )
@@ -395,7 +355,7 @@ def _check_envelope_written(plan: Plan) -> Callable[[Path], None]:
             info = inspect(fh, path=path)
             if info.size != plan.size_after:
                 raise FfmetaError(f"self-check failed: file size {info.size} != {plan.size_after}")
-            found = _locate(fh, info, plan.section)
+            found = _locate(fh, info)
         if found.envelope != plan.envelope:
             raise FfmetaError("self-check failed: metadata read back differs from what was written")
 
@@ -406,7 +366,6 @@ def add(
     path: PathLike,
     meta: Mapping[str, Any],
     *,
-    section: str = DEFAULT_SECTION,
     output: PathLike | None = None,
     with_hash: bool = True,
     reserve: int = 0,
@@ -415,8 +374,8 @@ def add(
 ) -> Path:
     """Embed ``meta`` (a JSON object) in ``path``.
 
-    The block is appended at the end of the file and only the two pointer
-    words of ``section`` (``extra_constants`` by default) change.  With
+    The block is appended at the end of the file in ``temp_historyfile``;
+    only its two pointer words change. With
     ``output`` the file is copied first and the original is untouched.
     ``reserve`` keeps extra zero bytes inside the block so a later
     :func:`edit` can grow in place; ``align_sector`` pads the block to end on
@@ -430,7 +389,6 @@ def add(
         lambda target: plan_add(
             target,
             meta,
-            section=section,
             with_hash=with_hash,
             reserve=reserve,
             align_sector=align_sector,
@@ -444,7 +402,7 @@ def add(
 # --- read -------------------------------------------------------------------
 
 
-def read(path: PathLike, *, envelope: bool = False, section: str | None = None) -> dict[str, Any]:
+def read(path: PathLike, *, envelope: bool = False) -> dict[str, Any]:
     """Return the user metadata (or the whole envelope) stored in ``path``.
 
     Raises :class:`NoMetadataError` when there is none.
@@ -452,7 +410,7 @@ def read(path: PathLike, *, envelope: bool = False, section: str | None = None) 
     target = Path(path)
     with open(target, "rb") as fh:
         info = inspect(fh, path=target)
-        found = _locate(fh, info, section)
+        found = _locate(fh, info)
     return found.envelope if envelope else found.envelope["meta"]
 
 
@@ -625,7 +583,7 @@ def _check_removed(plan: Plan) -> Callable[[Path], None]:
             if (info.flh[start_w], info.flh[len_w]) != (orig["start"], orig["length"]):
                 raise FfmetaError("self-check failed: pointer words were not restored")
             try:
-                _locate(fh, info, plan.section)
+                _locate(fh, info)
             except NoMetadataError:
                 return
         raise FfmetaError("self-check failed: metadata still present after remove")
@@ -671,26 +629,22 @@ def _raw_values(component: Any) -> list[Any]:
     return values
 
 
-def from_mule(umfile: Any, section: str | None = None) -> dict[str, Any]:
+def from_mule(umfile: Any) -> dict[str, Any]:
     """Decode ffmeta metadata from a loaded Mule ``UMFile`` object.
 
     Raises :class:`NoMetadataError` when no supported section of the object
     holds an ffmeta block.
     """
-    sections = _check_section(section) if section else METADATA_SECTIONS
-    for name in sections:
-        component = getattr(umfile, name, None)
-        if component is None:
-            continue
+    component = getattr(umfile, METADATA_SECTION, None)
+    if component is not None:
         values = _raw_values(component)
-        if len(values) < _payload.HEADER_WORDS:
-            continue
-        try:
-            block = words_to_bytes(int(v) for v in values)
-            meta: dict[str, Any] = _payload.decode(block)["meta"]
-            return meta
-        except (NoMetadataError, TypeError, ValueError, OverflowError):
-            continue
+        if len(values) >= _payload.HEADER_WORDS:
+            try:
+                block = words_to_bytes(int(v) for v in values)
+                meta: dict[str, Any] = _payload.decode(block)["meta"]
+                return meta
+            except (NoMetadataError, TypeError, ValueError, OverflowError):
+                pass
     raise NoMetadataError(
         "no ffmeta metadata in the Mule object. Note that Mule versions without "
         "MetOffice/mule PR #41 read header components sequentially instead of seeking to "

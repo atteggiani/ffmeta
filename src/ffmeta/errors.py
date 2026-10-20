@@ -8,7 +8,7 @@ class FfmetaError(Exception):
 
 
 class FormatError(FfmetaError):
-    """The file is not a 64-bit big-endian UM file, or its headers are inconsistent."""
+    """The file is not a UM file, or its headers are inconsistent."""
 
 
 class NoMetadataError(FfmetaError):

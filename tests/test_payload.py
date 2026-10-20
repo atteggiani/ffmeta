@@ -16,7 +16,6 @@ from ffmeta._layout import IMDI, WORD_SIZE
 def env_for(meta, **overrides):
     env = p.make_envelope(
         meta,
-        section="extra_constants",
         original_header={"start": IMDI, "length": IMDI},
         original_size=65536,
         original_sha256="0" * 64,
@@ -25,10 +24,10 @@ def env_for(meta, **overrides):
     return env
 
 
-def test_magic_word_is_ascii_and_positive():
+def test_magic_is_eight_ascii_bytes():
     assert p.MAGIC == b"FFMETA01"
-    assert p.MAGIC_WORD > 0
-    assert p.MAGIC_WORD.to_bytes(8, "big") == p.MAGIC
+    assert len(p.MAGIC) == WORD_SIZE
+    assert p.MAGIC.isascii()
 
 
 def test_encode_decode_roundtrip(sample_meta):
@@ -95,8 +94,11 @@ def test_bad_json_and_schema_are_corrupt(sample_meta):
         p.decode(bytes(block))
     for key, value in [
         ("ffmeta", 2),
+        ("tool_version", None),
+        ("section", "extra_constants"),
         ("section", "lookup"),
-        ("layout", "weird"),
+        ("created", None),
+        ("modified", None),
         ("original_sha256", "zz"),
         ("original_size", -1),
         ("meta", []),
@@ -142,7 +144,6 @@ def test_to_jsonable_conversions():
     with pytest.raises(TypeError):
         p.make_envelope(
             ["not", "a", "dict"],
-            section="extra_constants",  # type: ignore[arg-type]
             original_header={"start": 1, "length": 1},
             original_size=0,
             original_sha256=None,

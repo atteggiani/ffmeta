@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import importlib
 import io
 import json
 import os
 import stat
 import sys
+from types import SimpleNamespace
 
 import pytest
 
 import ffmeta
+from ffmeta import cli as cli_module
 from ffmeta.cli import main
 from fixtures import make_um_file, read_word
 
@@ -33,6 +36,16 @@ def test_version_and_help(capsys):
     with pytest.raises(SystemExit) as exc:
         main([])
     assert exc.value.code == 2
+
+
+def test_keyboard_interrupt_is_reported(capsys, monkeypatch):
+    class Parser:
+        def parse_args(self, argv):
+            return SimpleNamespace(func=lambda args: (_ for _ in ()).throw(KeyboardInterrupt))
+
+    monkeypatch.setattr(cli_module, "build_parser", Parser)
+    assert main([]) == 2
+    assert "interrupted" in capsys.readouterr().err
 
 
 def test_add_read_edit_remove(ff_file, capsys):
@@ -63,9 +76,10 @@ def test_add_read_edit_remove(ff_file, capsys):
     code, out, err = run(capsys, "read", ff_file, "--key", "nope")
     assert code == 1 and "not found" in err
     code, out, _ = run(capsys, "read", ff_file, "--envelope")
-    assert code == 0 and json.loads(out)["section"] == "extra_constants"
-    code, out, err = run(capsys, "read", ff_file, "--section", "temp_historyfile")
-    assert code == 1 and "no ffmeta metadata" in err
+    assert code == 0 and json.loads(out)["section"] == "temp_historyfile"
+    with pytest.raises(SystemExit) as exc:
+        main(["read", str(ff_file), "--section", "temp_historyfile"])
+    assert exc.value.code == 2
 
     code, out, _ = run(
         capsys, "edit", ff_file, "--set", "a.b=4", "--unset", "project", "--unset", "missing"
@@ -93,8 +107,6 @@ def test_add_from_json_file_and_stdin(ff_file, tmp_path, capsys, monkeypatch):
         ff_file,
         "--json-file",
         "-",
-        "--section",
-        "temp_historyfile",
         "--reserve",
         "100",
         "--align-sector",
@@ -136,7 +148,7 @@ def test_error_exit_codes_without_tracebacks(ff_file, tmp_path, capsys):
 def test_dry_run_writes_nothing(ff_file, capsys):
     before = ff_file.read_bytes()
     code, out, _ = run(capsys, "add", ff_file, "--set", "a=1", "--dry-run")
-    assert code == 0 and "append" in out and "FLH word 130" in out
+    assert code == 0 and "append" in out and "FLH word 135" in out
     assert ff_file.read_bytes() == before
     ffmeta.add(ff_file, {"a": 1})
     after = ff_file.read_bytes()
@@ -173,12 +185,11 @@ def test_remove_warning_goes_to_stderr(tmp_path, capsys):
 
     env = p.make_envelope(
         {"m": 1},
-        section="extra_constants",
         original_header={"start": IMDI, "length": IMDI},
         original_size=0,
         original_sha256=None,
     )
-    path = make_um_file(tmp_path / "mid.ff", extra_constants=p.encode(env))
+    path = make_um_file(tmp_path / "mid.ff", temp_historyfile=p.encode(env))
     code, out, err = run(capsys, "remove", path)
     assert code == 0 and "removed" in out
     assert "ffmeta: warning:" in err and "not byte-identical" in err

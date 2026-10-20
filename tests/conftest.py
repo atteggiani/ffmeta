@@ -31,9 +31,9 @@ def kind(request):
     return request.param
 
 
-@pytest.fixture(params=["extra_constants", "temp_historyfile"])
-def section(request):
-    return request.param
+@pytest.fixture
+def section():
+    return "temp_historyfile"
 
 
 @pytest.fixture

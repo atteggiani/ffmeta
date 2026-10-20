@@ -24,25 +24,24 @@ from typing import Any
 
 import numpy as np
 
-from ._layout import METADATA_SECTIONS, SECTOR_WORDS, WORD_SIZE
-from ._version import __version__
+import ffmeta
+
+from ._layout import METADATA_SECTION, SECTOR_WORDS, WORD_SIZE
 from .errors import CorruptMetadataError, NoMetadataError
 
 MAGIC_PREFIX = b"FFMETA"
 FORMAT_VERSION = 1
 MAGIC = MAGIC_PREFIX + b"%02d" % FORMAT_VERSION
-MAGIC_WORD = int.from_bytes(MAGIC, "big")
 HEADER_WORDS = 2
 HEADER_BYTES = HEADER_WORDS * WORD_SIZE
 ENVELOPE_VERSION = 1
-LAYOUTS = ("trailing", "inline")
+LAYOUTS = ("trailing",)
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 _REQUIRED_KEYS = (
     "ffmeta",
     "tool_version",
     "section",
-    "layout",
     "created",
     "modified",
     "original_header",
@@ -94,11 +93,9 @@ def dumps(obj: Any) -> str:
 def make_envelope(
     meta: Mapping[str, Any],
     *,
-    section: str,
     original_header: Mapping[str, int],
     original_size: int,
     original_sha256: str | None,
-    layout: str = "trailing",
     created: str | None = None,
 ) -> dict[str, Any]:
     """Build a new envelope around user metadata."""
@@ -107,9 +104,8 @@ def make_envelope(
     now = created or utcnow_iso()
     env = {
         "ffmeta": ENVELOPE_VERSION,
-        "tool_version": __version__,
-        "section": section,
-        "layout": layout,
+        "tool_version": ffmeta.__version__,
+        "section": METADATA_SECTION,
         "created": now,
         "modified": now,
         "original_header": {
@@ -143,10 +139,8 @@ def validate_envelope(env: Any) -> None:
         raise fail(f"unsupported envelope version {env['ffmeta']!r}")
     if not isinstance(env["tool_version"], str):
         raise fail("tool_version is not a string")
-    if env["section"] not in METADATA_SECTIONS:
+    if env["section"] != METADATA_SECTION:
         raise fail(f"unknown section {env['section']!r}")
-    if env["layout"] not in LAYOUTS:
-        raise fail(f"unknown layout {env['layout']!r}")
     for key in ("created", "modified"):
         if not isinstance(env[key], str):
             raise fail(f"{key} is not a string")

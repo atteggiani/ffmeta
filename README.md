@@ -5,12 +5,11 @@ fieldsfiles and ancillary files, without disturbing anything the UM, Mule or
 Iris read.
 
 UM files (UMDP F03) have no place for free-text metadata. `ffmeta` stores a
-small, self-describing JSON block in a header section that the specification
-marks as unused (`EXTRA_CONSTANTS` by default, or `TEMP_HISTORYFILE`), as a
-post-processing step on an already-written file. The block is appended at the
-end of the file; the only words of the original file that change are the two
-header words that point at the section. `remove` restores the original file
-byte for byte.
+small, self-describing JSON block in the unused `TEMP_HISTORYFILE` header
+section as a post-processing step on an already-written file. The block is
+appended at the end of the file; the only words of the original file that
+change are the two header words that point at the section. `remove` restores
+the original file byte for byte.
 
 The only runtime dependency is NumPy. Mule and Iris are optional and are only
 imported by `verify` and `from_mule`.
@@ -42,7 +41,6 @@ ffmeta verify run.ff -O run_original.ff --mule --iris
 - `--set a.b=3` creates nested keys; the value is parsed as JSON when possible
   and kept as a string otherwise. `--set` can be combined with `--json` /
   `--json-file` (`--set` wins). `--json-file -` reads stdin.
-- `--section extra_constants|temp_historyfile` chooses the header section.
 - `--reserve BYTES` keeps zero padding inside the block so later edits can
   grow in place; `--align-sector` pads to a 2048-word sector boundary.
 - `-o OUT` copies the file first and leaves the source untouched; `--dry-run`
@@ -73,13 +71,13 @@ ffmeta.from_mule(mule.load_umfile("run.ff"))  # decode from a loaded Mule object
 Signatures:
 
 ```python
-add(path, meta, *, section="extra_constants", output=None, with_hash=True,
-    reserve=0, align_sector=False, force=False, dry_run=False) -> Path
-read(path, *, envelope=False, section=None) -> dict
+add(path, meta, *, output=None, with_hash=True, reserve=0, align_sector=False,
+  force=False, dry_run=False) -> Path
+read(path, *, envelope=False) -> dict
 edit(path, changes=None, *, replace=None, unset=(), output=None) -> Path
 remove(path, *, output=None) -> Path
 has_metadata(path) -> bool
-from_mule(umfile, section=None) -> dict
+from_mule(umfile) -> dict
 verify(path, *, original=None, mule=False, iris=False) -> Report
 ```
 
@@ -94,8 +92,8 @@ the pre-`add` file (block no longer at the end, see below).
 ```
 before add                              after add
 word 1    ┌──────────────────────┐      word 1    ┌──────────────────────┐
-          │ fixed length header  │                │ fixed length header  │  words 130-131
-          │  (130,131) = (-32768,│                │  (130,131) = (S, L)  │  are the ONLY
+          │ fixed length header  │                │ fixed length header  │  words 135-136
+          │  (135,136) = (-32768,│                │  (135,136) = (S, L)  │  are the ONLY
           │             -32768)  │                │                      │  changed words
 word 257  ├──────────────────────┤      word 257  ├──────────────────────┤
           │ integer constants    │                │ integer constants    │
@@ -112,8 +110,9 @@ word 160  ├──────────────────────�
                                                   └──────────────────────┘ EOF
 ```
 
-`S = file_size_in_bytes / 8 + 1`. Every component, every LOOKUP entry (so
-every `LBEGIN`/`LBNREC`) and all field data stay where they were.
+`S = file_size_in_bytes / 8 + 1`. The block is stored in `TEMP_HISTORYFILE`.
+Every component, every LOOKUP entry (so every `LBEGIN`/`LBNREC`) and all field
+data stay where they were.
 
 If another tool rewrites the file (Mule's `to_file` puts the section in its
 canonical position before LOOKUP), the block is no longer last. `read`, `edit`
@@ -145,7 +144,7 @@ Because the text is ASCII, no word read as a float is NaN or Inf. The JSON is
 an envelope:
 
 ```json
-{"ffmeta": 1, "tool_version": "0.1.0", "section": "extra_constants", "layout": "trailing",
+{"ffmeta": 1, "tool_version": "0.1.0", "section": "extra_constants",
  "created": "2026-10-16T01:00:00Z", "modified": "2026-10-16T01:00:00Z",
  "original_header": {"start": -32768, "length": -32768},
  "original_size": 65536, "original_sha256": "<hex or null>",
@@ -183,11 +182,11 @@ check and a summary; exits 1 on any FAIL.
 *sequentially* from the end of the fixed length header, ignoring their start
 addresses; only LOOKUP is located by its pointer. Such a Mule loads an
 `ffmeta`-processed file fine and sees identical field data, but it cannot see
-the metadata (it reads unrelated words into `extra_constants`) and it drops
+the metadata (it reads unrelated words into `temp_historyfile`) and it drops
 the block when it rewrites the file with `to_file`. MetOffice/mule
 [PR #41](https://github.com/MetOffice/mule/pull/41) makes Mule seek to each
 component's start address; with it the metadata is visible in
-`umfile.extra_constants` / `umfile.temp_historyfile` (`ffmeta.from_mule`) and
+`umfile.temp_historyfile` (`ffmeta.from_mule`) and
 survives a `to_file` round trip. `verify --mule` checks this behaviourally and
 fails with an explicit message when the Mule in use cannot see the metadata.
 
@@ -196,7 +195,7 @@ section. Cubes are identical before and after `add`.
 
 **The UM.** This tool does not run the UM. The file stays well-formed under
 UMDP F03 and nothing the UM reads has moved, but whether a particular UM
-build is happy with a non-empty `EXTRA_CONSTANTS`/`TEMP_HISTORYFILE` section
+build is happy with a non-empty `TEMP_HISTORYFILE` section
 placed after DATA has not been tested here. Try a real UM run with a processed
 file before relying on it.
 
@@ -235,10 +234,12 @@ fixtures, Python 3.12, NumPy 2.5.4):
 
 ```sh
 pip install -e .[dev]
-pytest                     # Mule/Iris tests skip when the libraries are absent
+pytest                     # includes pytest-cov coverage reporting
 PYTHONPATH=/path/to/mule/lib pytest   # with a Mule checkout
 ruff check . && ruff format --check .
 ```
+
+Package versions are derived from Git tags by setuptools-scm.
 
 `tests/fixtures.py` generates synthetic fieldsfiles/ancillaries with NumPy
 only; the `mule_seeks` session fixture probes the installed Mule behaviourally

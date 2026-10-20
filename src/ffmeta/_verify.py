@@ -520,7 +520,7 @@ def _mule_checks(report: Report, path: Path, original: Path | None, found: Locat
                 return
             report.add(PASS, "mule_load", f"mule.load_umfile succeeded ({len(ff.fields)} fields)")
             try:
-                meta = from_mule(ff, found.section)
+                meta = from_mule(ff)
             except NoMetadataError:
                 meta = None
             _mule_version_check(report, version, seeks, decoded=meta is not None)

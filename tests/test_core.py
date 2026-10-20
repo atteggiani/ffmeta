@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 
 import numpy as np
 import pytest
 
 import ffmeta
+from ffmeta import core as core_module
 from ffmeta import payload as p
-from ffmeta._layout import COMPONENT_BY_NAME, WORD_SIZE, inspect
+from ffmeta._layout import COMPONENT_BY_NAME, METADATA_SECTION, WORD_SIZE, Region, inspect
 from ffmeta.core import _Transaction, plan_add, plan_edit, plan_remove
 from fixtures import IMDI, byteswap_file, make_um_file, read_word, to_32bit_file, write_word
 
@@ -20,16 +22,17 @@ def pointer_words(section):
     return comp.start_word, comp.length_word
 
 
-def test_add_read_remove_roundtrip(um_file, section, sample_meta):
+def test_add_read_remove_roundtrip(um_file, sample_meta):
     original = um_file.read_bytes()
     size_words = len(original) // WORD_SIZE
+    section = "temp_historyfile"
     start_w, len_w = pointer_words(section)
 
-    out = ffmeta.add(um_file, sample_meta, section=section)
+    out = ffmeta.add(um_file, sample_meta)
     assert out == um_file
     assert ffmeta.has_metadata(um_file)
     assert ffmeta.read(um_file) == sample_meta
-    assert ffmeta.read(um_file, section=section) == sample_meta
+    assert read_word(um_file, 130) == IMDI
 
     modified = um_file.read_bytes()
     assert len(modified) > len(original)
@@ -43,7 +46,6 @@ def test_add_read_remove_roundtrip(um_file, section, sample_meta):
 
     env = ffmeta.read(um_file, envelope=True)
     assert env["section"] == section
-    assert env["layout"] == "trailing"
     assert env["original_header"] == {"start": IMDI, "length": IMDI}
     assert env["original_size"] == len(original)
     assert env["original_sha256"] == hashlib.sha256(original).hexdigest()
@@ -69,12 +71,29 @@ def test_add_with_output_leaves_source_untouched(ff_file, tmp_path, sample_meta)
     assert ffmeta.read(out2)["x"] == 1
 
 
+def test_output_same_path_is_in_place(ff_file):
+    out = ffmeta.add(ff_file, {"a": 1}, output=ff_file)
+    assert out == ff_file
+    assert ffmeta.read(ff_file) == {"a": 1}
+
+
 def test_add_output_removed_on_failure(ff_file, tmp_path):
     ffmeta.add(ff_file, {"a": 1})
     target = tmp_path / "fail.ff"
     with pytest.raises(ffmeta.MetadataExistsError):
         ffmeta.add(ff_file, {"a": 2}, output=target)
     assert not target.exists()
+
+
+def test_output_cleanup_suppresses_unlink_error(ff_file, tmp_path, monkeypatch):
+    target = tmp_path / "failed.ff"
+
+    def fail_unlink(self, *args, **kwargs):
+        raise OSError("cannot unlink")
+
+    monkeypatch.setattr(type(target), "unlink", fail_unlink)
+    with pytest.raises(TypeError):
+        ffmeta.add(ff_file, {"bad": object()}, output=target)
 
 
 def test_no_hash(ff_file):
@@ -92,15 +111,13 @@ def test_read_without_metadata(um_file):
         ffmeta.edit(um_file, {"a": 1})
 
 
-def test_read_wrong_section(ff_file):
-    ffmeta.add(ff_file, {"a": 1}, section="temp_historyfile")
+def test_metadata_section_is_fixed(ff_file):
+    ffmeta.add(ff_file, {"a": 1})
     assert ffmeta.read(ff_file) == {"a": 1}
-    with pytest.raises(ffmeta.NoMetadataError):
+    with pytest.raises(TypeError):
+        ffmeta.add(ff_file, {"a": 1}, section="extra_constants")
+    with pytest.raises(TypeError):
         ffmeta.read(ff_file, section="extra_constants")
-    with pytest.raises(ValueError):
-        ffmeta.read(ff_file, section="lookup")
-    with pytest.raises(ValueError):
-        ffmeta.add(ff_file, {"a": 1}, section="data")
 
 
 def test_add_requires_mapping(ff_file):
@@ -119,8 +136,9 @@ def test_numpy_values_are_converted(ff_file):
 # --- edit -------------------------------------------------------------------
 
 
-def test_edit_keep_size_in_place(um_file, section):
-    ffmeta.add(um_file, {"a": 1, "b": {"c": 2}}, section=section, reserve=512)
+def test_edit_keep_size_in_place(um_file):
+    section = "temp_historyfile"
+    ffmeta.add(um_file, {"a": 1, "b": {"c": 2}}, reserve=512)
     size = um_file.stat().st_size
     start, length = (read_word(um_file, w) for w in pointer_words(section))
     ffmeta.edit(um_file, {"b": {"d": 3}}, unset=["a", "missing.key"])
@@ -140,11 +158,14 @@ def test_edit_replace(ff_file):
     assert ffmeta.read(ff_file) == {"c": 3}
     with pytest.raises(TypeError):
         ffmeta.edit(ff_file, replace=[1])  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        ffmeta.edit(ff_file, changes=[1])  # type: ignore[arg-type]
 
 
-def test_edit_grow_trailing_block(um_file, section):
+def test_edit_grow_trailing_block(um_file):
+    section = "temp_historyfile"
     original = um_file.read_bytes()
-    ffmeta.add(um_file, {"a": 1}, section=section)
+    ffmeta.add(um_file, {"a": 1})
     size1 = um_file.stat().st_size
     big = {"big": "x" * 5000}
     ffmeta.edit(um_file, big)
@@ -163,7 +184,7 @@ def test_reserve_allows_growth_in_place(ff_file):
     ffmeta.edit(ff_file, {"pad": "y" * 3000})
     assert ff_file.stat().st_size == size
     # the reserve is counted in words and preserved
-    env_len = read_word(ff_file, 131)
+    env_len = read_word(ff_file, 136)
     assert env_len * WORD_SIZE >= 4096
 
 
@@ -182,7 +203,7 @@ def test_add_refuses_existing_metadata(ff_file):
     with pytest.raises(ffmeta.MetadataExistsError):
         ffmeta.add(ff_file, {"b": 2})
     with pytest.raises(ffmeta.MetadataExistsError):
-        ffmeta.add(ff_file, {"b": 2}, section="temp_historyfile")
+        ffmeta.add(ff_file, {"b": 2})
     assert ff_file.read_bytes() == before
 
 
@@ -191,22 +212,40 @@ def test_add_refuses_section_in_use(tmp_path, section):
     path = make_um_file(tmp_path / "inuse.ff", **{section: other})
     before = path.read_bytes()
     with pytest.raises(ffmeta.SectionInUseError):
-        ffmeta.add(path, {"a": 1}, section=section)
+        ffmeta.add(path, {"a": 1})
     assert path.read_bytes() == before
-    # the other section is still available
-    other_section = [s for s in ("extra_constants", "temp_historyfile") if s != section][0]
-    ffmeta.add(path, {"a": 1}, section=other_section)
-    assert ffmeta.read(path) == {"a": 1}
 
 
 def test_add_refuses_damaged_block(ff_file):
     ffmeta.add(ff_file, {"a": 1})
-    start = read_word(ff_file, 130)
+    start = read_word(ff_file, 135)
     write_word(ff_file, start + 1, 0)  # bad length word
     with pytest.raises(ffmeta.MetadataExistsError, match="damaged"):
         ffmeta.add(ff_file, {"b": 2})
     with pytest.raises(ffmeta.CorruptMetadataError):
         ffmeta.read(ff_file)
+
+
+def test_read_block_size_and_region_guards():
+    with pytest.raises(ffmeta.NoMetadataError, match="too short"):
+        core_module._read_block(io.BytesIO(b""), Region(METADATA_SECTION, 1, 1))
+
+    header = p.MAGIC + (1000).to_bytes(8, "big", signed=True)
+    with pytest.raises(ffmeta.CorruptMetadataError, match="holds only"):
+        core_module._read_block(io.BytesIO(header), Region(METADATA_SECTION, 1, 2))
+
+    huge_length = (1 << 26) + 1
+    header = p.MAGIC + huge_length.to_bytes(8, "big", signed=True)
+    with pytest.raises(ffmeta.CorruptMetadataError, match="implausibly large"):
+        core_module._read_block(io.BytesIO(header), Region(METADATA_SECTION, 1, 9_000_000))
+
+
+def test_locate_rejects_section_beyond_eof(ff_file):
+    write_word(ff_file, 135, ff_file.stat().st_size // WORD_SIZE + 100)
+    with open(ff_file, "rb") as fh:
+        info = inspect(fh, strict=False)
+        with pytest.raises(ffmeta.FormatError, match="extends past the end"):
+            core_module._locate(fh, info)
 
 
 def test_add_refuses_wrong_formats(ff_file, tmp_path):
@@ -304,13 +343,37 @@ def test_remove_rollback_on_failure(ff_file, monkeypatch):
     assert ffmeta.read(ff_file) == {"a": 1}
 
 
+def test_removed_self_check_rejects_inconsistent_results(ff_file, tmp_path):
+    ffmeta.add(ff_file, {"a": 1})
+    plan = plan_remove(ff_file)
+    check = core_module._check_removed(plan)
+    with pytest.raises(ffmeta.FfmetaError, match="file size"):
+        check(ff_file)
+
+    clean = tmp_path / "clean.ff"
+    clean.write_bytes(ff_file.read_bytes())
+    ffmeta.remove(clean)
+    write_word(clean, 135, read_word(clean, 100))
+    with pytest.raises(ffmeta.FfmetaError, match="pointer words"):
+        check(clean)
+
+    still_present = tmp_path / "still-present.ff"
+    still_present.write_bytes(ff_file.read_bytes())
+    plan.size_after = still_present.stat().st_size
+    plan.envelope["original_header"] = {
+        "start": read_word(still_present, 135),
+        "length": read_word(still_present, 136),
+    }
+    with pytest.raises(ffmeta.FfmetaError, match="metadata still present"):
+        core_module._check_removed(plan)(still_present)
+
+
 # --- block not at the end of the file ---------------------------------------
 
 
-def canonical_block(meta, section="extra_constants", reserve=0):
+def canonical_block(meta, section="temp_historyfile", reserve=0):
     env = p.make_envelope(
         meta,
-        section=section,
         original_header={"start": IMDI, "length": IMDI},
         original_size=0,
         original_sha256=None,
@@ -402,6 +465,18 @@ def test_plans_do_not_write(ff_file):
     assert "truncate" in text and ff_file.read_bytes() == after
 
 
+def test_add_self_check_rejects_wrong_size_and_envelope(ff_file):
+    plan = plan_add(ff_file, {"a": 1})
+    check = core_module._check_envelope_written(plan)
+    with pytest.raises(ffmeta.FfmetaError, match="file size"):
+        check(ff_file)
+
+    ffmeta.add(ff_file, {"a": 1})
+    plan.envelope["meta"] = {"wrong": True}
+    with pytest.raises(ffmeta.FfmetaError, match="read back differs"):
+        check(ff_file)
+
+
 # --- from_mule ---------------------------------------------------------------
 
 
@@ -417,16 +492,30 @@ class _FakeUMFile:
 
 
 def test_from_mule_with_fake_object(ff_file, sample_meta, section):
-    ffmeta.add(ff_file, sample_meta, section=section)
+    ffmeta.add(ff_file, sample_meta)
     info = inspect(ff_file)
     region = info.flh.component_region(section)
     raw = ff_file.read_bytes()[region.offset : region.offset + region.nbytes]
     words = np.frombuffer(raw, dtype=">i8").tolist()
     fake = _FakeUMFile(**{section: _FakeComponent(words)})
     assert ffmeta.from_mule(fake) == sample_meta
-    assert ffmeta.from_mule(fake, section) == sample_meta
+    with pytest.raises(TypeError):
+        ffmeta.from_mule(fake, section)
     other = _FakeUMFile(extra_constants=_FakeComponent([1, 2, 3]))
     with pytest.raises(ffmeta.NoMetadataError, match="PR #41"):
         ffmeta.from_mule(other)
     with pytest.raises(ffmeta.NoMetadataError):
         ffmeta.from_mule(_FakeUMFile())
+
+
+@pytest.mark.parametrize("bad_words", [[1, 2], [None, "bad", 3], [None, 1 << 80, 3]])
+def test_from_mule_skips_invalid_component_values(bad_words):
+    fake = _FakeUMFile(temp_historyfile=_FakeComponent(bad_words))
+    with pytest.raises(ffmeta.NoMetadataError):
+        ffmeta.from_mule(fake)
+
+
+def test_from_mule_skips_short_raw_component():
+    fake = _FakeUMFile(temp_historyfile=_FakeComponent([None]))
+    with pytest.raises(ffmeta.NoMetadataError):
+        ffmeta.from_mule(fake)
